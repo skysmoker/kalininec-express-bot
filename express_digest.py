@@ -32,16 +32,30 @@ MONTHS_RU = [
     "июля", "августа", "сентября", "октября", "ноября", "декабря"
 ]
 
-# Координаты станций для автоматического определения кодов Яндекс.Расписаний
-STATION_COORDS = {
-    "golitsyno": (55.6152, 36.9866),
-    "belorussky": (55.7764, 37.5815),
-    "selyatino": (55.5249, 36.9806),
-    "aprelevka": (55.5453, 37.0736),
-    "kievsky": (55.7436, 37.5673),
+# Официальные нерабочие праздничные и перенесённые выходные дни РФ (будни)
+RU_HOLIDAYS = {
+    # 2026
+    "2026-01-01", "2026-01-02", "2026-01-05", "2026-01-06",
+    "2026-01-07", "2026-01-08", "2026-01-09", "2026-02-23",
+    "2026-03-09", "2026-05-01", "2026-05-11", "2026-06-12",
+    "2026-11-04", "2026-12-31",
+    # 2027
+    "2027-01-01", "2027-01-04", "2027-01-05", "2027-01-06",
+    "2027-01-07", "2027-01-08", "2027-02-22", "2027-02-23",
+    "2027-03-08", "2027-05-03", "2027-05-10", "2027-06-14",
+    "2027-11-04", "2027-11-05", "2027-12-31",
 }
 
-# Маршруты от Калининца до МКАД с промежуточными точками для фиксации шоссе
+# Координаты и ключевые слова для автоопределения кодов станций Яндекс.Расписаний
+STATION_TARGETS = {
+    "golitsyno": (55.6152, 36.9866, "Голицыно"),
+    "belorussky": (55.7764, 37.5815, "Белорусский"),
+    "selyatino": (55.5249, 36.9806, "Селятино"),
+    "aprelevka": (55.5453, 37.0736, "Апрелевка"),
+    "kievsky": (55.7436, 37.5673, "Киевский"),
+}
+
+# Маршруты от Калининца до МКАД
 TRAFFIC_ROUTES = [
     ("Киевское ш.", "55.5665,36.9685:55.5245,36.9825:55.6378,37.4565"),
     ("Минское ш.", "55.5665,36.9685:55.6215,36.9935:55.7155,37.3825"),
@@ -84,7 +98,7 @@ def get_station_code(key: str) -> str | None:
     if key in cache:
         return cache[key]
 
-    lat, lng = STATION_COORDS[key]
+    lat, lng, title_hint = STATION_TARGETS[key]
     try:
         resp = requests.get(
             "https://api.rasp.yandex.net/v3.0/nearest_stations/",
@@ -92,16 +106,23 @@ def get_station_code(key: str) -> str | None:
                 "apikey": YANDEX_RASP_API_KEY,
                 "lat": lat,
                 "lng": lng,
-                "distance": 2,
-                "transport_types": "suburban",
+                "distance": 5,
                 "lang": "ru_RU",
             },
             timeout=10,
         )
         resp.raise_for_status()
         stations = resp.json().get("stations", [])
-        if stations:
-            code = stations[0]["code"]
+        rail_stations = [
+            s for s in stations
+            if s.get("transport_type") in ("train", "suburban")
+        ]
+        chosen = next(
+            (s for s in rail_stations if title_hint.lower() in s.get("title", "").lower()),
+            rail_stations[0] if rail_stations else None
+        )
+        if chosen:
+            code = chosen["code"]
             cache[key] = code
             STATIONS_CACHE_FILE.write_text(
                 json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8"
@@ -155,7 +176,6 @@ def fetch_upcoming_trains(from_key: str, to_key: str, limit: int = 3) -> list[st
         if upcoming:
             return upcoming
 
-        # Если на сегодня рейсов больше нет (поздний вечер), проверяем интервальные сегменты МЦД
         intervals = data.get("interval_segments", [])
         if intervals:
             iv = intervals[0].get("interval", {})
@@ -226,25 +246,40 @@ def get_traffic_block() -> list[str]:
 
 
 def get_rates_block() -> list[str]:
-    """Получает курсы USD и EUR от ЦБ РФ и BTC от CoinGecko."""
+    """Получает курсы USD и EUR к рублю через глобальный CDN и BTC от CoinGecko."""
     parts = []
-    try:
-        cbr = requests.get("https://www.cbr-xml-daily.ru/daily_json.js", timeout=10).json()
-        valute = cbr["Valute"]
-        for code in ("USD", "EUR"):
-            cur = valute[code]["Value"]
-            prev = valute[code]["Previous"]
-            diff = cur - prev
-            sign = "+" if diff >= 0 else ""
-            parts.append(f"<b>{code}:</b> {cur:.2f} ₽ <i>({sign}{diff:.2f})</i>")
-    except Exception as e:
-        logging.warning(f"Не удалось получить курсы ЦБ РФ: {e}")
+    yesterday_str = (now_msk().date() - datetime.timedelta(days=1)).isoformat()
+
+    for code in ("usd", "eur"):
+        try:
+            cur_data = requests.get(
+                f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{code}.min.json",
+                timeout=10,
+            ).json()
+            cur = cur_data[code]["rub"]
+
+            diff_str = ""
+            try:
+                prev_data = requests.get(
+                    f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{yesterday_str}/v1/currencies/{code}.min.json",
+                    timeout=8,
+                ).json()
+                prev = prev_data[code]["rub"]
+                diff = cur - prev
+                sign = "+" if diff >= 0 else ""
+                diff_str = f" <i>({sign}{diff:.2f})</i>"
+            except Exception:
+                pass
+
+            parts.append(f"<b>{code.upper()}:</b> {cur:.2f} ₽{diff_str}")
+        except Exception as e:
+            logging.warning(f"Не удалось получить курс {code.upper()}: {e}")
 
     try:
         cg = requests.get(
             "https://api.coingecko.com/api/v3/simple/price",
             params={"ids": "bitcoin", "vs_currencies": "usd", "include_24hr_change": "true"},
-            timeout=10
+            timeout=10,
         ).json()
         btc_price = cg["bitcoin"]["usd"]
         btc_change = cg["bitcoin"]["usd_24h_change"]
@@ -259,23 +294,17 @@ def get_rates_block() -> list[str]:
 
 
 def get_calendar_block(today: datetime.date) -> list[str]:
-    """Проверяет праздники/выходные и напоминание о счётчиках (20–25 число)."""
+    """Проверяет праздники/выходные РФ и напоминание о счётчиках (20–25 число)."""
     notes = []
 
     if 20 <= today.day <= 25:
         notes.append("⚡ Не забудьте передать показания счётчиков.")
 
-    try:
-        resp = requests.get(f"https://isdayoff.ru/{today.strftime('%Y%m%d')}", timeout=5)
-        code = resp.text.strip()
-        if code == "1" and today.weekday() < 5:
-            notes.append("🎉 Сегодня официальный праздничный выходной день!")
-        elif today.weekday() == 4 and code == "0":
-            notes.append("Впереди выходные!")
-    except Exception as e:
-        logging.warning(f"Ошибка проверки isdayoff.ru: {e}")
-        if today.weekday() == 4:
-            notes.append("Впереди выходные!")
+    today_iso = today.isoformat()
+    if today_iso in RU_HOLIDAYS:
+        notes.append("🎉 Сегодня официальный праздничный выходной день!")
+    elif today.weekday() == 4:
+        notes.append("Впереди выходные!")
 
     if not notes:
         return []

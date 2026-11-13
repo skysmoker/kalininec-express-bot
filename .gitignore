@@ -2,5 +2,6 @@
 venv/
 *.log
 last_sent.txt
+stations_cache.json
 __pycache__/
 *.pyc
