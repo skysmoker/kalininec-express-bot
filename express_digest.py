@@ -57,8 +57,8 @@ STATION_TARGETS = {
 
 # Маршруты от Калининца до МКАД
 TRAFFIC_ROUTES = [
-    ("Киевское ш.", "55.5665,36.9685:55.5245,36.9825:55.6378,37.4565"),
-    ("Минское ш.", "55.5665,36.9685:55.6215,36.9935:55.7155,37.3825"),
+    ("Киевское ш.", "55.558396,36.990592:55.5355,37.0195:55.6395,37.4595"),
+    ("Минское ш.", "55.558396,36.990592:55.6015,36.9365:55.7138,37.3845"),
 ]
 
 logging.basicConfig(
@@ -221,13 +221,15 @@ def get_traffic_block() -> list[str]:
                     "key": TOMTOM_API_KEY,
                     "traffic": "true",
                     "travelMode": "car",
+                    "computeTravelTimeFor": "all",
                 },
                 timeout=10,
             )
             resp.raise_for_status()
             summary = resp.json()["routes"][0]["summary"]
             travel_min = round(summary["travelTimeInSeconds"] / 60)
-            delay_min = round(summary.get("trafficDelayInSeconds", 0) / 60)
+            free_min = round(summary.get("noTrafficTravelTimeInSeconds", summary["travelTimeInSeconds"]) / 60)
+            delay_min = max(0, travel_min - free_min)
 
             if delay_min >= 15:
                 status = f"🔴 пробка +{delay_min} мин"
