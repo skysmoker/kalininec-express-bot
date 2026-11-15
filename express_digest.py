@@ -1,3 +1,4 @@
+import re
 import os
 import sys
 import json
@@ -313,20 +314,66 @@ def get_calendar_block(today: datetime.date) -> list[str]:
     return ["📅 <b>Календарь:</b> " + " ".join(notes)]
 
 
+RU_USSR_TEXT_RE = re.compile(
+    r"\b("
+    r"росси[яиюей]|российск\w*|ссср|рсфср|советск\w*|русск\w*|"
+    r"российск\w* импери\w*|древн\w* рус[иь]|киевск\w* рус[иь]|московск\w* царств\w*|"
+    r"москв[аеуой]|санкт-петербург\w*|петербург\w*|ленинград\w*|петроград\w*|"
+    r"кремл[ьяе]|госдум\w*|совнарком\w*|цк кпсс|кпсс|влксм|вцик|"
+    r"рф|красн\w* арми\w*|советск\w* арми\w*|вмф россии|вмф ссср|роскосмос\w*"
+    r")\b",
+    re.IGNORECASE,
+)
+
+RU_USSR_META_RE = re.compile(
+    r"\b("
+    r"росси[яиюей]|российск\w*|ссср|рсфср|советск\w*|русск\w*|"
+    r"российск\w* импери\w*|москв[аеуой]|санкт-петербург\w*|ленинград\w*|петроград\w*"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _is_russia_or_ussr_event(ev: dict) -> bool:
+    """Проверяет, относится ли историческое событие к России, СССР или Российской империи."""
+    text = ev.get("text", "")
+    if RU_USSR_TEXT_RE.search(text):
+        return True
+
+    for page in ev.get("pages", []):
+        meta = " ".join(
+            str(page.get(k, ""))
+            for k in ("normalizedtitle", "title", "description", "extract")
+        )
+        if RU_USSR_META_RE.search(meta):
+            return True
+
+    return False
+
+
 def get_fact_of_the_day(today: datetime.date) -> list[str]:
-    """Берёт одно историческое событие на текущую дату из русской Википедии."""
+    """Берёт историческое событие о России или СССР на текущую дату из русской Википедии."""
     try:
         url = f"https://ru.wikipedia.org/api/rest_v1/feed/onthisday/events/{today.month:02d}/{today.day:02d}"
         headers = {"User-Agent": "KalininetsExpressBot/1.0"}
         resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         events = resp.json().get("events", [])
-        compact = [
+
+        ru_events = [
             ev for ev in events
-            if 50 <= len(ev.get("text", "")) <= 190 and ev.get("year")
+            if ev.get("year") and int(ev["year"]) < 2014 and ev.get("text") and _is_russia_or_ussr_event(ev)
         ]
-        if compact:
-            chosen = random.choice(compact)
+
+        # Сначала ищем компактные факты, при нехватке — чуть расширяем допустимую длину
+        pool = [ev for ev in ru_events if 45 <= len(ev["text"].strip()) <= 195]
+        if not pool:
+            pool = [ev for ev in ru_events if 35 <= len(ev["text"].strip()) <= 260]
+
+        if pool:
+            # Отдаём предпочтение событиям, где Россия/СССР упомянуты прямо в тексте
+            direct = [ev for ev in pool if RU_USSR_TEXT_RE.search(ev["text"])]
+            chosen = random.choice(direct or pool)
             year = chosen["year"]
             text = chosen["text"].strip()
             if not text.endswith("."):
@@ -335,7 +382,6 @@ def get_fact_of_the_day(today: datetime.date) -> list[str]:
     except Exception as e:
         logging.warning(f"Не удалось получить факт дня из Википедии: {e}")
     return []
-
 
 def build_digest() -> str:
     today = now_msk().date()
