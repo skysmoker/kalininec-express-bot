@@ -251,7 +251,14 @@ def get_traffic_block() -> list[str]:
 def get_rates_block() -> list[str]:
     """Получает курсы USD и EUR к рублю через глобальный CDN и BTC от CoinGecko."""
     parts = []
-    yesterday_str = (now_msk().date() - datetime.timedelta(days=1)).isoformat()
+    cache_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rates_cache.json")
+    try:
+        with open(cache_path, "r", encoding="utf-8") as cf:
+            rates_cache = json.load(cf)
+    except Exception:
+        rates_cache = {}
+
+    cache_updated = False
 
     for code in ("usd", "eur"):
         try:
@@ -259,24 +266,49 @@ def get_rates_block() -> list[str]:
                 f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{code}.min.json",
                 timeout=10,
             ).json()
-            cur = cur_data[code]["rub"]
+            cur = float(cur_data[code]["rub"])
+            api_date_str = cur_data.get("date")
 
-            diff_str = ""
+            if api_date_str:
+                base_date = datetime.date.fromisoformat(api_date_str)
+            else:
+                base_date = now_msk().date() - datetime.timedelta(days=1)
+                api_date_str = base_date.isoformat()
+
+            prev_date_str = (base_date - datetime.timedelta(days=1)).isoformat()
+
+            prev = None
             try:
                 prev_data = requests.get(
-                    f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{yesterday_str}/v1/currencies/{code}.min.json",
+                    f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@{prev_date_str}/v1/currencies/{code}.min.json",
                     timeout=8,
                 ).json()
-                prev = prev_data[code]["rub"]
+                prev = float(prev_data[code]["rub"])
+            except Exception:
+                cached = rates_cache.get(code, {})
+                if cached.get("date") and cached.get("date") != api_date_str:
+                    prev = float(cached["rate"])
+
+            diff_str = ""
+            if prev is not None:
                 diff = cur - prev
                 sign = "+" if diff >= 0 else ""
                 diff_str = f" <i>({sign}{diff:.2f})</i>"
-            except Exception:
-                pass
+
+            if rates_cache.get(code, {}).get("date") != api_date_str:
+                rates_cache[code] = {"date": api_date_str, "rate": cur}
+                cache_updated = True
 
             parts.append(f"<b>{code.upper()}:</b> {cur:.2f} ₽{diff_str}")
         except Exception as e:
             logging.warning(f"Не удалось получить курс {code.upper()}: {e}")
+
+    if cache_updated:
+        try:
+            with open(cache_path, "w", encoding="utf-8") as cf:
+                json.dump(rates_cache, cf, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logging.warning(f"Не удалось сохранить rates_cache.json: {e}")
 
     try:
         cg = requests.get(
@@ -294,7 +326,6 @@ def get_rates_block() -> list[str]:
     if not parts:
         return []
     return ["💱 <b>Курсы:</b>", "   • " + " • ".join(parts)]
-
 
 def get_calendar_block(today: datetime.date) -> list[str]:
     """Проверяет праздники/выходные РФ и напоминание о счётчиках (20–25 число)."""
